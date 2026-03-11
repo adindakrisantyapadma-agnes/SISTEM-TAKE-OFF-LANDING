@@ -1,0 +1,225 @@
+import serial
+import matplotlib.pyplot as plt
+import numpy as np
+import threading
+import time
+from queue import Queue
+
+# ===============================
+# KONFIGURASI
+# ===============================
+
+SERIAL_PORTS = ['COM8','COM23']
+BAUD_RATE = 921600
+
+SCROLL_WINDOW_SIZE = 150
+CSI_START_INDEX = 10
+CSI_END_INDEX = 120
+
+EMA_ALPHA = 0.35      # lebih responsif
+MAX_QUEUE = 500
+
+PORT_COLORS = {
+    'COM8':'#1f77b4',
+    'COM23':'#ff7f0e'
+}
+
+# ===============================
+# PARSE CSI
+# ===============================
+
+def parse_csi_data(line):
+
+    if not line.startswith("CSI_DATA"):
+        return None
+
+    try:
+
+        start = line.find('"[')
+        end = line.rfind(']"')
+
+        if start == -1 or end == -1:
+            return None
+
+        raw = line[start+2:end]
+
+        vals = np.fromstring(raw, sep=',', dtype=np.int16)
+
+        if len(vals) < 10:
+            return None
+
+        I = vals[::2]
+        Q = vals[1::2]
+
+        mag = np.sqrt(I**2 + Q**2)
+
+        mag = mag[CSI_START_INDEX:CSI_END_INDEX]
+
+        return np.mean(mag)
+
+    except:
+        return None
+
+
+# ===============================
+# SERIAL READER THREAD
+# ===============================
+
+class SerialReader(threading.Thread):
+
+    def __init__(self,port,queue):
+
+        super().__init__(daemon=True)
+
+        self.port = port
+        self.queue = queue
+        self.running = True
+
+        try:
+            self.ser = serial.Serial(
+                port,
+                BAUD_RATE,
+                timeout=0.1,
+                inter_byte_timeout=0.01
+            )
+            print(f"{port} connected")
+
+        except:
+            print(f"{port} failed")
+            self.running = False
+
+
+    def run(self):
+
+        while self.running:
+
+            try:
+
+                line = self.ser.readline().decode(errors='ignore').strip()
+
+                val = parse_csi_data(line)
+
+                if val is not None:
+
+                    if self.queue.qsize() < MAX_QUEUE:
+                        self.queue.put(val)
+
+            except:
+                pass
+
+
+# ===============================
+# MAIN
+# ===============================
+
+def main():
+
+    plt.ion()
+
+    fig,ax = plt.subplots(figsize=(12,6))
+
+    queues={}
+    buffers={}
+    ema={}
+    lines={}
+    readers=[]
+
+    x=np.arange(SCROLL_WINDOW_SIZE)
+
+    for port in SERIAL_PORTS:
+
+        q=Queue()
+
+        reader=SerialReader(port,q)
+        reader.start()
+
+        readers.append(reader)
+
+        queues[port]=q
+        buffers[port]=np.zeros(SCROLL_WINDOW_SIZE)
+        ema[port]=0
+
+        line, = ax.plot(
+            x,
+            buffers[port],
+            color=PORT_COLORS.get(port,'black'),
+            label=port
+        )
+
+        lines[port]=line
+
+
+    ax.set_title("CSI Real Time Plot")
+    ax.set_xlabel("Frame")
+    ax.set_ylabel("CSI Magnitude")
+
+    ax.set_xlim(0,SCROLL_WINDOW_SIZE)
+    ax.set_ylim(0,80)
+
+    ax.grid(True)
+    ax.legend()
+
+    last_plot=time.time()
+
+    while True:
+
+        for port in SERIAL_PORTS:
+
+            q=queues[port]
+
+            if not q.empty():
+
+                val=q.get()
+
+                # ======================
+                # spike rejection
+                # ======================
+
+                buf=buffers[port]
+
+                if np.abs(val-np.mean(buf[-10:]))>20:
+                    val=np.mean(buf[-10:])
+
+                # ======================
+                # EMA smoothing
+                # ======================
+
+                if ema[port]==0:
+                    ema[port]=val
+                else:
+                    ema[port]=EMA_ALPHA*val+(1-EMA_ALPHA)*ema[port]
+
+                buf=np.roll(buf,-1)
+                buf[-1]=ema[port]
+
+                buffers[port]=buf
+
+
+        # ======================
+        # UPDATE PLOT 30 FPS
+        # ======================
+
+        if time.time()-last_plot>0.03:
+
+            all_data=[]
+
+            for port in SERIAL_PORTS:
+
+                lines[port].set_ydata(buffers[port])
+                all_data.extend(buffers[port][-50:])
+
+            if len(all_data)>0:
+
+                ax.set_ylim(
+                    max(0,min(all_data)-5),
+                    max(all_data)+5
+                )
+
+            fig.canvas.draw_idle()
+            fig.canvas.flush_events()
+
+            last_plot=time.time()
+
+
+if __name__ == "__main__":
+    main()
