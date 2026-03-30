@@ -1,0 +1,278 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import re
+import warnings
+warnings.filterwarnings('ignore')
+
+FILE = "csi_long_log8 terbang.csv"
+
+print("="*80)
+print("📡 CSI DATA ANALYSIS - ERROR & REFLECTION DETECTION (FUSION VERSION)")
+print("="*80)
+
+# =========================
+# 1. LOAD DATA
+# =========================
+
+def extract_csi(df, rx_name):
+    df_rx = df[df["rx"] == rx_name]
+    packets = []
+
+    for _, row in df_rx["csi_raw"].items():
+        if not isinstance(row, str):
+            continue
+        try:
+            match = re.search(r'\[(.*?)\]', row)
+            if match:
+                values = list(map(float, match.group(1).split(",")))
+                packets.append(values)
+        except:
+            continue
+
+    if not packets:
+        print(f"⚠️ No data for {rx_name}")
+        return np.array([])
+
+    min_len = min(len(p) for p in packets)
+    packets = [p[:min_len] for p in packets]
+
+    print(f"✅ {rx_name}: {len(packets)} packets")
+    return np.array(packets)
+
+
+print("\n📂 Loading CSV...")
+df = pd.read_csv(FILE)
+
+csi_rx1 = extract_csi(df, "RX1")
+csi_rx2 = extract_csi(df, "RX2")
+csi_rx3 = extract_csi(df, "RX3")
+csi_rx4 = extract_csi(df, "RX4")
+
+# =========================
+# 2. PREPROCESS
+# =========================
+
+def normalize_csi(csi):
+    if len(csi) == 0:
+        return csi
+    return (csi - np.mean(csi, axis=0)) / (np.std(csi, axis=0) + 1e-8)
+
+
+def filter_noise(csi_data, window_size=5):
+    if len(csi_data) == 0:
+        return csi_data
+
+    filtered = np.zeros_like(csi_data)
+
+    for i in range(csi_data.shape[1]):
+        filtered[:, i] = np.convolve(
+            csi_data[:, i],
+            np.ones(window_size) / window_size,
+            mode='same'
+        )
+
+    return filtered
+
+
+csi_rx1 = filter_noise(normalize_csi(csi_rx1), 7)
+csi_rx2 = filter_noise(normalize_csi(csi_rx2), 7)
+csi_rx3 = filter_noise(normalize_csi(csi_rx3), 7)
+csi_rx4 = filter_noise(normalize_csi(csi_rx4), 7)
+
+# =========================
+# 3. DETECTOR
+# =========================
+
+class CSIDetector:
+    def __init__(self, csi, name):
+        self.csi = csi
+        self.name = name
+        self.n_packets = len(csi)
+
+    def detect_errors(self):
+        if len(self.csi) == 0:
+            return np.array([])
+        z = np.abs((self.csi - np.mean(self.csi)) / (np.std(self.csi) + 1e-8))
+        return z > 3
+
+    def detect_reflections(self):
+        if self.n_packets < 2:
+            return np.array([])
+        diff = np.abs(np.diff(self.csi, axis=0))
+        thr = np.mean(diff) + 2 * np.std(diff)
+        return diff > thr
+
+    def detect_motion(self):
+        if self.n_packets < 2:
+            return np.array([])
+        diff = np.abs(np.diff(self.csi, axis=0))
+        motion = np.median(diff, axis=1)
+
+        if np.max(motion) > 0:
+            motion = motion / np.max(motion) * 100
+
+        return motion
+
+# =========================
+# 4. MULTI RX FUSION
+# =========================
+
+class MultiRXFusion:
+    def __init__(self, detectors):
+        self.detectors = detectors
+
+    def classify(self):
+        motions = []
+
+        for d in self.detectors:
+            m = d.detect_motion()
+            if len(m) > 0:
+                thr = np.mean(m) + np.std(m)
+                motions.append(m > thr)
+
+        if not motions:
+            return []
+
+        min_len = min(len(m) for m in motions)
+        motions = [m[:min_len] for m in motions]
+
+        stacked = np.stack(motions)
+        consensus = np.sum(stacked, axis=0)
+
+        real = consensus >= 2
+
+        results = []
+        for m in motions:
+            reflection = m & (~real)
+            results.append({
+                "real": real,
+                "reflection": reflection
+            })
+
+        return results
+
+# =========================
+# 5. VISUALIZATION (FIXED)
+# =========================
+
+def plot_rx(ax_main, ax_speed, ax_stats, csi, detector, fusion=None):
+
+    if len(csi) == 0:
+        return
+
+    # 🔥 DOWNSAMPLE (anti lag)
+    csi = csi[::3, :]
+    csi = csi[:, ::2]
+
+    im = ax_main.imshow(
+        np.log1p(np.abs(csi.T)),
+        aspect='auto',
+        cmap='RdYlBu_r',
+        origin='lower'
+    )
+
+    # ERROR (dibatasi)
+    err = detector.detect_errors()
+    if len(err) > 0:
+        pts = np.where(err)
+
+        if len(pts[0]) > 2000:
+            idx = np.random.choice(len(pts[0]), 2000, replace=False)
+            ax_main.scatter(pts[0][idx], pts[1][idx], c='red', s=5)
+        else:
+            ax_main.scatter(pts[0], pts[1], c='red', s=5)
+
+    # 🔥 REFLECTION (FIX TOTAL - TANPA RECTANGLE)
+    ref = detector.detect_reflections()
+    if len(ref) > 0:
+        pts = np.where(ref)
+
+        if len(pts[0]) > 2000:
+            idx = np.random.choice(len(pts[0]), 2000, replace=False)
+            t_plot = pts[0][idx]
+            sc_plot = pts[1][idx]
+        else:
+            t_plot = pts[0]
+            sc_plot = pts[1]
+
+        ax_main.scatter(
+            t_plot,
+            sc_plot,
+            c='white',
+            s=3,
+            alpha=0.6
+        )
+
+    ax_main.set_title(detector.name)
+
+    # SPEED
+    motion = detector.detect_motion()
+    if len(motion) > 0:
+        speed = motion / 100 * 60
+        x = np.arange(len(speed))
+        ax_speed.plot(x, speed)
+
+        if fusion:
+            for i in range(len(fusion["real"])):
+                if fusion["real"][i]:
+                    ax_speed.axvspan(i, i+1, color='green', alpha=0.2)
+                if fusion["reflection"][i]:
+                    ax_speed.axvspan(i, i+1, color='red', alpha=0.2)
+
+    ax_speed.set_title("Speed")
+
+    # STATS
+    ax_stats.text(0, 1, f"Packets: {detector.n_packets}", va='top')
+    ax_stats.axis('off')
+
+    return im
+
+# =========================
+# 6. MAIN
+# =========================
+
+rx_data = [
+    (csi_rx1, "RX1 Front"),
+    (csi_rx2, "RX2 Side"),
+    (csi_rx3, "RX3 Rear"),
+    (csi_rx4, "RX4 Top")
+]
+
+detectors = [CSIDetector(csi, name) for csi, name in rx_data if len(csi) > 0]
+
+fusion = MultiRXFusion(detectors)
+fusion_results = fusion.classify()
+
+fig = plt.figure(figsize=(18, 12))
+gs = fig.add_gridspec(4, 3)
+
+for i, (csi, name) in enumerate(rx_data):
+
+    if len(csi) == 0:
+        continue
+
+    detector = detectors[i]
+
+    ax_main = fig.add_subplot(gs[i, 0:2])
+    ax_speed = fig.add_subplot(gs[i, 2])
+
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+    ax_stats = inset_axes(ax_speed, width="100%", height="40%", loc='lower left')
+
+    im = plot_rx(
+        ax_main,
+        ax_speed,
+        ax_stats,
+        csi,
+        detector,
+        fusion_results[i] if i < len(fusion_results) else None
+    )
+
+cbar = fig.colorbar(im)
+cbar.set_label("CSI Amplitude")
+
+plt.tight_layout()
+plt.show()
+
+print("\n✅ DONE - Fusion detection aktif (NO LAG VERSION)")
