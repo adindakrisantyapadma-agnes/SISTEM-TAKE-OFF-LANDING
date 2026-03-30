@@ -3,4 +3,4 @@ Sistem take off landing drone yang menggunakan 2 metode untuk identifikasi lokas
 ![Drone](image.png)
 ![CSI](csi_image.png)
 ![CSI_ruangan](CSI-Plotting-Ruangan.png)
-![CSI_tracking](Visualisasi csi_long_log8 terbang.png)
+![CSI_tracking](Visualisasi csi_long_log terbang.png)
