@@ -1,0 +1,134 @@
+import serial
+import threading
+import time
+import csv
+import queue
+
+# ==========================
+# CONFIG
+# ==========================
+
+PORTS = {
+    "RX1": "COM19",
+    "RX2": "COM8",
+    "RX3": "COM14",
+    "RX4": "COM7"
+}
+
+BAUD = 921600
+
+OUTPUT_FILE = "csi_long_log.csv"
+
+# ==========================
+# QUEUE BUFFER
+# ==========================
+
+data_queue = queue.Queue()
+
+running = True
+
+# ==========================
+# SERIAL READER
+# ==========================
+
+def serial_reader(rx_name, port):
+
+    global running
+
+    try:
+        ser = serial.Serial(port, BAUD)
+        print(f"{rx_name} connected on {port}")
+    except:
+        print(f"FAILED to connect {port}")
+        return
+
+    while running:
+
+        try:
+            line = ser.readline().decode(errors="ignore").strip()
+
+            if len(line) < 10:
+                continue
+
+            timestamp = time.time()
+
+            data_queue.put([timestamp, rx_name, line])
+
+        except:
+            pass
+
+
+# ==========================
+# FILE WRITER
+# ==========================
+
+def file_writer():
+
+    global running
+
+    with open(OUTPUT_FILE, "w", newline="") as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow(["timestamp", "rx", "csi_raw"])
+
+        count = 0
+
+        while running or not data_queue.empty():
+
+            try:
+
+                row = data_queue.get(timeout=1)
+
+                writer.writerow(row)
+
+                count += 1
+
+                if count % 1000 == 0:
+                    print("Saved", count, "packets")
+
+            except:
+                pass
+
+
+# ==========================
+# START THREADS
+# ==========================
+
+threads = []
+
+for rx, port in PORTS.items():
+
+    t = threading.Thread(
+        target=serial_reader,
+        args=(rx, port),
+        daemon=True
+    )
+
+    t.start()
+    threads.append(t)
+
+writer_thread = threading.Thread(target=file_writer)
+writer_thread.start()
+
+print("CSI logging started...")
+print("Press CTRL+C to stop")
+
+# ==========================
+# MAIN LOOP
+# ==========================
+
+try:
+
+    while True:
+        time.sleep(1)
+
+except KeyboardInterrupt:
+
+    print("\nStopping logger...")
+
+    running = False
+
+writer_thread.join()
+
+print("Data saved to:", OUTPUT_FILE)
