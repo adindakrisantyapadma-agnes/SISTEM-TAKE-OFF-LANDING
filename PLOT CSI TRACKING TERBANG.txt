@@ -1,0 +1,242 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import re
+import warnings
+warnings.filterwarnings('ignore')
+
+FILE = "csi_long_log10 terbang.csv"
+
+print("=" * 80)
+print("📡 CSI TRACKING 4 RX - FULL ACCURACY VERSION")
+print("=" * 80)
+
+# =========================
+# 1. LOAD DATA
+# =========================
+def extract_csi(df, rx_name):
+    df_rx = df[df["rx"] == rx_name]
+    packets = []
+
+    for _, row in df_rx["csi_raw"].items():
+        if not isinstance(row, str):
+            continue
+        try:
+            match = re.search(r'\[(.*?)\]', row)
+            if match:
+                values = list(map(float, match.group(1).split(",")))
+                packets.append(values)
+        except:
+            continue
+
+    if not packets:
+        print(f"⚠️ No data for {rx_name}")
+        return np.array([])
+
+    min_len = min(len(p) for p in packets)
+    packets = [p[:min_len] for p in packets]
+
+    print(f"✅ {rx_name}: {len(packets)} packets")
+    return np.array(packets)
+
+
+print("\n📂 Loading CSV...")
+df = pd.read_csv(FILE)
+
+csi_rx1 = extract_csi(df, "RX1")
+csi_rx2 = extract_csi(df, "RX2")
+csi_rx3 = extract_csi(df, "RX3")
+csi_rx4 = extract_csi(df, "RX4")
+
+# =========================
+# 2. PREPROCESS
+# =========================
+def normalize_csi(csi):
+    if len(csi) == 0:
+        return csi
+    return (csi - np.mean(csi, axis=0)) / (np.std(csi, axis=0) + 1e-8)
+
+
+def filter_noise(csi, window=5):
+    if len(csi) == 0:
+        return csi
+
+    out = np.zeros_like(csi)
+    for i in range(csi.shape[1]):
+        out[:, i] = np.convolve(csi[:, i], np.ones(window) / window, mode='same')
+    return out
+
+
+csi_rx1 = filter_noise(normalize_csi(csi_rx1), 7)
+csi_rx2 = filter_noise(normalize_csi(csi_rx2), 7)
+csi_rx3 = filter_noise(normalize_csi(csi_rx3), 7)
+csi_rx4 = filter_noise(normalize_csi(csi_rx4), 7)
+
+# =========================
+# 3. DETECTOR
+# =========================
+class CSIDetector:
+    def __init__(self, csi, name):
+        self.csi = csi
+        self.name = name
+
+    def motion(self):
+        if len(self.csi) < 2:
+            return np.array([])
+        diff = np.abs(np.diff(self.csi, axis=0))
+        m = np.median(diff, axis=1)
+
+        # normalize ke 0-1 (lebih stabil dari 0-100)
+        if np.max(m) > 0:
+            m = m / np.max(m)
+
+        return m
+
+# =========================
+# 4. FUSION (FULL DATA)
+# =========================
+class Fusion:
+    def __init__(self, detectors):
+        self.detectors = detectors
+
+    def get_motion_matrix(self):
+        motions = []
+
+        for d in self.detectors:
+            m = d.motion()
+            if len(m) > 0:
+                motions.append(m)
+
+        min_len = min(len(m) for m in motions)
+        motions = [m[:min_len] for m in motions]
+
+        return np.array(motions)  # (RX, time)
+
+# =========================
+# 5. LOCALIZER (CONTINUOUS)
+# =========================
+class Localizer:
+    def __init__(self, detectors):
+        self.detectors = detectors
+        self.rx_pos = [(0, 0), (5, 0), (5, 5), (0, 5)]
+
+    def estimate(self, motion_matrix):
+        pos = []
+
+        for t in range(motion_matrix.shape[1]):
+
+            weights = motion_matrix[:, t]
+
+            # 🔥 exponential weighting (lebih sensitif)
+            weights = np.exp(weights * 3)
+
+            weights = weights + 1e-6
+            weights = weights / np.sum(weights)
+
+            x = sum(weights[i] * self.rx_pos[i][0] for i in range(4))
+            y = sum(weights[i] * self.rx_pos[i][1] for i in range(4))
+
+            pos.append((x, y))
+
+        return np.array(pos)
+
+# =========================
+# 6. INTERPOLATION
+# =========================
+def interpolate_path(pos, factor=3):
+    if len(pos) < 2:
+        return pos
+
+    new_pos = []
+
+    for i in range(len(pos)-1):
+        p1 = pos[i]
+        p2 = pos[i+1]
+
+        for j in range(factor):
+            t = j / factor
+            interp = (1 - t) * p1 + t * p2
+            new_pos.append(interp)
+
+    new_pos.append(pos[-1])
+    return np.array(new_pos)
+
+# =========================
+# 7. SMOOTHING (ADVANCED)
+# =========================
+def smooth_kalman(pos):
+    if len(pos) == 0:
+        return pos
+
+    smooth = [pos[0]]
+    alpha = 0.2
+
+    for i in range(1, len(pos)):
+        new = alpha * pos[i] + (1 - alpha) * smooth[-1]
+        smooth.append(new)
+
+    return np.array(smooth)
+
+# =========================
+# 8. VISUALIZATION
+# =========================
+def plot_tracking(pos):
+
+    if len(pos) == 0:
+        print("⚠️ No tracking data")
+        return
+
+    pos[:, 0] = np.clip(pos[:, 0], 0, 5)
+    pos[:, 1] = np.clip(pos[:, 1], 0, 5)
+
+    x = pos[:, 0]
+    y = pos[:, 1]
+
+    plt.figure(figsize=(6, 6))
+
+    plt.plot(x, y, '-', linewidth=2, label="Path")
+    plt.scatter(x, y, s=8)
+
+    rx = [(0, 0), (5, 0), (5, 5), (0, 5)]
+    for i, (rx_x, rx_y) in enumerate(rx):
+        plt.scatter(rx_x, rx_y, s=120)
+        plt.text(rx_x, rx_y, f"RX{i+1}", fontsize=10)
+
+    plt.title("CSI Tracking 4 RX (Full Accuracy)")
+    plt.xlabel("X (m)")
+    plt.ylabel("Y (m)")
+    plt.grid()
+    plt.axis('equal')
+    plt.legend()
+
+    plt.show()
+
+# =========================
+# 9. MAIN
+# =========================
+rx_data = [
+    (csi_rx1, "RX1"),
+    (csi_rx2, "RX2"),
+    (csi_rx3, "RX3"),
+    (csi_rx4, "RX4")
+]
+
+detectors = [CSIDetector(csi, name) for csi, name in rx_data if len(csi) > 0]
+
+print(f"\n✅ Valid RX: {len(detectors)} receivers detected")
+
+fusion = Fusion(detectors)
+motion_matrix = fusion.get_motion_matrix()
+
+localizer = Localizer(detectors)
+positions = localizer.estimate(motion_matrix)
+
+# 🔥 biar tidak terlalu padat
+positions = positions[::2]
+
+positions = interpolate_path(positions, 3)
+positions = smooth_kalman(positions)
+
+plot_tracking(positions)
+
+print("\n✅ DONE - Full accuracy tracking 🚀")
