@@ -1,0 +1,269 @@
+import cv2
+import cv2.aruco as aruco
+import numpy as np
+import time
+from djitellopy import Tello
+
+# ==============================
+# KONEKSI TELLO
+# ==============================
+tello = Tello()
+tello.connect()
+
+battery = tello.get_battery()
+print("=" * 50)
+print(f"Battery: {battery}%")
+print("=" * 50)
+
+if battery < 20:
+    print("⚠️ Baterai terlalu rendah! Tidak bisa takeoff.")
+    exit()
+
+# ==============================
+# PARAMETER KAMERA
+# ==============================
+fx = 920
+fy = 920
+cx = 320
+cy = 240
+camera_matrix = np.array([[fx, 0, cx],
+                          [0, fy, cy],
+                          [0,  0,  1]], dtype=np.float32)
+dist_coeffs = np.zeros((5,1))
+MARKER_SIZE = 0.08  # 8 cm
+
+# ==============================
+# SETUP ARUCO
+# ==============================
+aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_5X5_100)
+aruco_params = aruco.DetectorParameters()
+detector = aruco.ArucoDetector(aruco_dict, aruco_params)
+
+# ==============================
+# PID PARAMETER
+# ==============================
+kp = 0.4
+kd = 0.2
+prev_error_x = 0
+prev_error_y = 0
+
+# ==============================
+# VARIABEL TRACKING
+# ==============================
+distance_history = []
+max_history = 30
+locked_on = False
+lock_start_time = None
+last_distance_print = 0
+print_interval = 1.0
+program_running = True
+
+# ==============================
+# STREAM VIDEO
+# ==============================
+tello.streamoff()
+time.sleep(1)
+tello.streamon()
+time.sleep(2)
+frame_read = tello.get_frame_read()
+
+# ==============================
+# TAKEOFF
+# ==============================
+print("\n🚁 Takeoff...")
+tello.takeoff()
+time.sleep(3)
+print(f"📏 Ketinggian: {tello.get_height()} cm")
+print("\n🎯 Mencari marker ID 0...")
+print("=" * 50)
+
+# ==============================
+# LOOP UTAMA
+# ==============================
+try:
+    while program_running:
+        frame = frame_read.frame
+        if frame is None:
+            continue
+
+        frame = cv2.resize(frame, (640, 480))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame_center = (320, 240)
+
+        corners, ids, _ = detector.detectMarkers(gray)
+
+        marker_found = False
+
+        if ids is not None and len(ids) > 0:
+            ids = ids.flatten()
+            for i, marker_id in enumerate(ids):
+                if int(marker_id) == 0:
+                    marker_found = True
+                    aruco.drawDetectedMarkers(frame, [corners[i]])
+
+                    # Estimasi pose
+                    rvec, tvec, _ = aruco.estimatePoseSingleMarkers(
+                        corners[i], MARKER_SIZE, camera_matrix, dist_coeffs
+                    )
+
+                    if tvec is not None:
+                        x_dist = tvec[0][0][0]
+                        y_dist = tvec[0][0][1]
+                        z_dist = tvec[0][0][2]
+
+                        # Hitung jarak total
+                        distance = np.sqrt(x_dist**2 + y_dist**2 + z_dist**2)
+                        distance_history.append(distance)
+                        if len(distance_history) > max_history:
+                            distance_history.pop(0)
+                        avg_distance = np.mean(distance_history)
+
+                        # Status lock
+                        if not locked_on:
+                            locked_on = True
+                            lock_start_time = time.time()
+                            print("\n🔒 LOCKED ON TO MARKER ID 0!")
+                            print("-" * 50)
+
+                        # Cetak jarak setiap 1 detik
+                        current_time = time.time()
+                        if current_time - last_distance_print >= print_interval:
+                            print(f"\n📊 DATA TRACKING - {current_time - lock_start_time:.1f}s")
+                            print(f"   • ID: 0")
+                            print(f"   • X: {x_dist:.3f} m")
+                            print(f"   • Y: {y_dist:.3f} m")
+                            print(f"   • Z: {z_dist:.3f} m")
+                            print(f"   • Total: {avg_distance:.3f} m")
+                            print(f"   • Posisi relatif: {x_dist:.2f}m kiri/kanan, {y_dist:.2f}m atas/bawah, {z_dist:.2f}m depan")
+                            print("-" * 50)
+                            last_distance_print = current_time
+
+                        # Gambar sumbu
+                        cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvec, tvec, 0.05)
+
+                        # =============================
+                        # KONTROL PID UNTUK MENGIKUTI MARKER
+                        # =============================
+                        pts = corners[i][0]
+                        cx_marker = int(np.mean(pts[:, 0]))
+                        cy_marker = int(np.mean(pts[:, 1]))
+
+                        error_x = cx_marker - frame_center[0]
+                        error_y = cy_marker - frame_center[1]
+
+                        derivative_x = error_x - prev_error_x
+                        derivative_y = error_y - prev_error_y
+
+                        yaw = int(kp * error_x + kd * derivative_x)
+                        ud = int(-kp * error_y - kd * derivative_y)
+
+                        yaw = np.clip(yaw, -30, 30)
+                        ud = np.clip(ud, -30, 30)
+
+                        # Gerak maju/mundur untuk menjaga jarak 0.5 m
+                        fb = 0
+                        target_distance = 0.5
+                        if z_dist > target_distance + 0.2:
+                            fb = 20
+                        elif z_dist < target_distance - 0.2:
+                            fb = -20
+
+                        tello.send_rc_control(0, fb, ud, yaw)
+
+                        # Tampilkan info di frame
+                        cv2.putText(frame, f"CMD - FB:{fb} UD:{ud} YAW:{yaw}", (400, 70),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+                        # Tampilkan jarak
+                        cv2.rectangle(frame, (5, 5), (350, 140), (0, 0, 0), -1)
+                        cv2.rectangle(frame, (5, 5), (350, 140), (0, 255, 0), 2)
+                        cv2.putText(frame, "ID: 0 [LOCKED]", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 2)
+                        cv2.putText(frame, f"X: {x_dist:.3f} m", (10,45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255),1)
+                        cv2.putText(frame, f"Y: {y_dist:.3f} m", (10,65), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255),1)
+                        cv2.putText(frame, f"Z: {z_dist:.3f} m", (10,85), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255),1)
+                        cv2.putText(frame, f"Total: {avg_distance:.3f} m", (10,105), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,255),1)
+                        cv2.putText(frame, f"Tracking: {current_time - lock_start_time:.1f}s", (10,125), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,0),1)
+
+                        # Gambar titik pusat marker dan garis ke tengah
+                        cv2.circle(frame, (cx_marker, cy_marker), 5, (0,255,255), -1)
+                        cv2.line(frame, frame_center, (cx_marker, cy_marker), (0,255,255), 2)
+
+                        # Tampilkan error
+                        cv2.putText(frame, f"Error X: {error_x}", (400,30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255),1)
+                        cv2.putText(frame, f"Error Y: {error_y}", (400,50), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255),1)
+
+                        prev_error_x = error_x
+                        prev_error_y = error_y
+
+                    break  # Hanya proses ID 0
+
+        # =============================
+        # JIKA MARKER TIDAK DITEMUKAN
+        # =============================
+        if not marker_found:
+            if locked_on:
+                print("\n⚠️ MARKER HILANG - Mencari ulang...")
+                locked_on = False
+                distance_history = []
+
+            # Mode pencarian: putar drone perlahan
+            tello.send_rc_control(0, 0, 0, 20)  # yaw = 20 (berputar)
+            cv2.putText(frame, "🔍 MENCARI MARKER ID 0... (BERPUTAR)", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+        # =============================
+        # GAMBAR ELEMEN VISUAL LAINNYA
+        # =============================
+        # Crosshair
+        cv2.line(frame, (300,240), (340,240), (0,255,0), 2)
+        cv2.line(frame, (320,220), (320,260), (0,255,0), 2)
+
+        # Status bar bawah
+        status_y = frame.shape[0] - 20
+        cv2.rectangle(frame, (5, status_y-15), (500, status_y+5), (0,0,0), -1)
+        if locked_on:
+            lock_time = time.time() - lock_start_time
+            cv2.putText(frame, f"Status: FOLLOWING | Durasi: {lock_time:.1f}s | Tekan Q", (10, status_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,255,0), 1)
+        else:
+            cv2.putText(frame, "Status: MENCARI | Tekan Q untuk berhenti", (10, status_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0,0,255), 1)
+
+        # Catatan tentang marker utuh
+        cv2.putText(frame, "Catatan: Marker harus utuh untuk terdeteksi.", (10, 460),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1)
+
+        cv2.imshow("TELLO ARUCO - FOLLOW & SEARCH", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            program_running = False
+            break
+        elif key == ord('r'):
+            locked_on = False
+            distance_history = []
+            print("\n🔄 Lock reset manual")
+
+        time.sleep(0.03)
+
+except KeyboardInterrupt:
+    print("\n⚠️ Program dihentikan user")
+except Exception as e:
+    print("\n❌ Error:", e)
+    import traceback
+    traceback.print_exc()
+
+# ==============================
+# PENDARATAN DAN PENUTUP
+# ==============================
+print("\n" + "=" * 50)
+print("🛬 Landing...")
+tello.send_rc_control(0, 0, 0, 0)
+time.sleep(1)
+tello.land()
+tello.streamoff()
+cv2.destroyAllWindows()
+print("✅ Program selesai")
+if locked_on:
+    print(f"📊 Total waktu tracking: {time.time() - lock_start_time:.1f}s")
+print("=" * 50)
