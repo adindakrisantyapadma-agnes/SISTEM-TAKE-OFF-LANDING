@@ -4,4 +4,6 @@ Sistem take off landing drone yang menggunakan 2 metode untuk identifikasi lokas
 ![CSI](csi_image.png)
 ![CSI_ruangan](Visualisasi_csi_plotting_ruangan.png)
 ![CSI_tracking](Visualisasi_csi_long_log_terbang.png)
+![Penempatan](PENEMPATAN_CSI.png)
+
 Kelemahan: drone bisa tiba tiba mati karena faktor lingkungan, seperti cahaya, jaringan, dll. CSI bisa tabrakan antar COM sehingga perlu build ulang kode.
