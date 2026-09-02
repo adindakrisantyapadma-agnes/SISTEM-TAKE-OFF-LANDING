@@ -1,0 +1,78 @@
+import pandas as pd
+import numpy as np
+import re
+
+# ==========================================
+# 1. FUNGSI PARSING DATA CSI (ESP32)
+# ==========================================
+def parse_csi_data(file_path):
+    df = pd.read_csv(file_path)
+    rssi_list, amp_list = [], []
+    
+    for line in df['csi_raw']:
+        if not isinstance(line, str) or "CSI_DATA" not in line:
+            continue
+        parts = line.split(',')
+        try:
+            rssi = int(parts[3])
+        except:
+            continue
+            
+        match = re.search(r'\[(.*?)\]', line)
+        if not match:
+            continue
+        try:
+            csi_str = match.group(1)
+            csi_raw_array = [int(x) for x in csi_str.split(',') if x.strip() != '']
+            real = np.array(csi_raw_array[0::2])
+            imag = np.array(csi_raw_array[1::2])
+            min_len = min(len(real), len(imag))
+            amplitude = np.sqrt(real[:min_len]**2 + imag[:min_len]**2)
+            rssi_list.append(rssi)
+            amp_list.append(np.mean(amplitude))
+        except:
+            continue
+    return pd.DataFrame({'RSSI': rssi_list, 'Amplitude': amp_list})
+
+# Load Kedua Data CSV
+print("🔄 Sedang menghitung data... Mohon tunggu sebentar.")
+df_stay = parse_csi_data('csi_long_log16 aluminium stay.csv')
+df_move = parse_csi_data('csi_long_log17 aluminium move.csv')
+
+# ==========================================
+# 2. FUNGSI EKSTRAKSI PARAMETER STATISTIK
+# ==========================================
+def hitung_statistik(df):
+    stats = {}
+    for col in ['RSSI', 'Amplitude']:
+        stats[f'{col}_min'] = df[col].min()
+        stats[f'{col}_max'] = df[col].max()
+        stats[f'{col}_mean'] = df[col].mean()
+        stats[f'{col}_median'] = df[col].median()
+        stats[f'{col}_std'] = df[col].std()
+        stats[f'{col}_var'] = df[col].var()
+    return stats
+
+stats_stay = hitung_statistik(df_stay)
+stats_move = hitung_statistik(df_move)
+
+# ==========================================
+# 3. CETAK HASIL AKHIR BENTUK TABEL TERMINAL
+# ==========================================
+print("\n" + "="*75)
+print(" TABEL DATA UNTUK RSSI (dBm)")
+print("="*75)
+print(f"{'Kondisi Objek':<18} | {'Min':<8} | {'Max':<8} | {'Mean (μ)':<9} | {'Median':<8} | {'Std Dev(σ)':<10} | {'Varians':<8}")
+print("-"*75)
+print(f"{'DIAM (Stay)':<18} | {stats_stay['RSSI_min']:<8.2f} | {stats_stay['RSSI_max']:<8.2f} | {stats_stay['RSSI_mean']:<9.2f} | {stats_stay['RSSI_median']:<8.2f} | {stats_stay['RSSI_std']:<10.2f} | {stats_stay['RSSI_var']:<8.2f}")
+print(f"{'BERGERAK (Move)':<18} | {stats_move['RSSI_min']:<8.2f} | {stats_move['RSSI_max']:<8.2f} | {stats_move['RSSI_mean']:<9.2f} | {stats_move['RSSI_median']:<8.2f} | {stats_move['RSSI_std']:<10.2f} | {stats_move['RSSI_var']:<8.2f}")
+print("="*75)
+
+print("\n" + "="*75)
+print(" TABEL DATA UNTUK AMPLITUDO CSI")
+print("="*75)
+print(f"{'Kondisi Objek':<18} | {'Min':<8} | {'Max':<8} | {'Mean (μ)':<9} | {'Median':<8} | {'Std Dev(σ)':<10} | {'Varians':<8}")
+print("-"*75)
+print(f"{'DIAM (Stay)':<18} | {stats_stay['Amplitude_min']:<8.2f} | {stats_stay['Amplitude_max']:<8.2f} | {stats_stay['Amplitude_mean']:<9.2f} | {stats_stay['Amplitude_median']:<8.2f} | {stats_stay['Amplitude_std']:<10.2f} | {stats_stay['Amplitude_var']:<8.2f}")
+print(f"{'BERGERAK (Move)':<18} | {stats_move['Amplitude_min']:<8.2f} | {stats_move['Amplitude_max']:<8.2f} | {stats_move['Amplitude_mean']:<9.2f} | {stats_move['Amplitude_median']:<8.2f} | {stats_move['Amplitude_std']:<10.2f} | {stats_move['Amplitude_var']:<8.2f}")
+print("="*75 + "\n")

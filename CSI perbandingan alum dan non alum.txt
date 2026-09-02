@@ -1,0 +1,115 @@
+import pandas as pd
+import numpy as np
+import re
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 1. FUNGSI PARSING DATA CSI
+# ==========================================
+def parse_csi_data(file_path):
+    df = pd.read_csv(file_path)
+    rssi_list, amp_list = [], []
+    
+    for line in df['csi_raw']:
+        if not isinstance(line, str) or "CSI_DATA" not in line:
+            continue
+        parts = line.split(',')
+        try:
+            rssi = int(parts[3])
+        except:
+            continue
+            
+        match = re.search(r'\[(.*?)\]', line)
+        if not match:
+            continue
+        try:
+            csi_str = match.group(1)
+            csi_raw_array = [int(x) for x in csi_str.split(',') if x.strip() != '']
+            real = np.array(csi_raw_array[0::2])
+            imag = np.array(csi_raw_array[1::2])
+            min_len = min(len(real), len(imag))
+            amplitude = np.sqrt(real[:min_len]**2 + imag[:min_len]**2)
+            rssi_list.append(rssi)
+            amp_list.append(np.mean(amplitude))
+        except:
+            continue
+    return pd.DataFrame({'RSSI': rssi_list, 'Amplitude': amp_list})
+
+# Load Data
+print("Memproses file CSV... Silakan tunggu.")
+df_stay = parse_csi_data('csi_long_log16 aluminium stay.csv')
+df_move = parse_csi_data('csi_long_log17 aluminium move.csv')
+
+# ==========================================
+# 2. CETAK DATA STATISTIK DI TERMINAL
+# ==========================================
+print("\n" + "="*45)
+print("HASIL PERBANDINGAN NILAI STATISTIK")
+print("="*45)
+print(f"[RSSI - DIAM (Stay)]")
+print(f"  Rata-rata (Mean)    = {df_stay['RSSI'].mean():.2f} dBm")
+print(f"  Standar Deviasi     = {df_stay['RSSI'].std():.2f}")
+print(f"  Fluktuasi (Varians) = {df_stay['RSSI'].var():.2f}")
+
+print(f"\n[RSSI - BERGERAK (Move)]")
+print(f"  Rata-rata (Mean)    = {df_move['RSSI'].mean():.2f} dBm")
+print(f"  Standar Deviasi     = {df_move['RSSI'].std():.2f}")
+print(f"  Fluktuasi (Varians) = {df_move['RSSI'].var():.2f}")
+
+print("-"*45)
+print(f"[AMPLITUDO - DIAM (Stay)]")
+print(f"  Rata-rata (Mean)    = {df_stay['Amplitude'].mean():.2f}")
+print(f"  Standar Deviasi     = {df_stay['Amplitude'].std():.2f}")
+print(f"  Fluktuasi (Varians) = {df_stay['Amplitude'].var():.2f}")
+
+print(f"\n[AMPLITUDO - BERGERAK (Move)]")
+print(f"  Rata-rata (Mean)    = {df_move['Amplitude'].mean():.2f}")
+print(f"  Standar Deviasi     = {df_move['Amplitude'].std():.2f}")
+print(f"  Fluktuasi (Varians) = {df_move['Amplitude'].var():.2f}")
+print("="*45 + "\n")
+
+# ==========================================
+# 3. PEMBUATAN GRAFIK STANDAR (2x2 Layout)
+# ==========================================
+plt.figure(figsize=(12, 8))
+N_PACKETS = 1000 # Menampilkan 1000 paket pertama agar grafik garis tidak terlalu padat
+
+# --- BARIS 1: GRAFIK RSSI ---
+# Kiri: Line Plot RSSI
+plt.subplot(2, 2, 1)
+plt.plot(df_stay['RSSI'].values[:N_PACKETS], label='Stay (Diam)', color='blue', alpha=0.7)
+plt.plot(df_move['RSSI'].values[:N_PACKETS], label='Move (Bergerak)', color='orange', alpha=0.7)
+plt.title('RSSI Terhadap Waktu')
+plt.xlabel('Indeks Paket')
+plt.ylabel('RSSI (dBm)')
+plt.legend()
+plt.grid(True)
+
+# Kanan: Boxplot RSSI
+plt.subplot(2, 2, 2)
+plt.boxplot([df_stay['RSSI'], df_move['RSSI']], labels=['Stay (Diam)', 'Move (Bergerak)'])
+plt.title('Distribusi / Fluktuasi RSSI')
+plt.ylabel('RSSI (dBm)')
+plt.grid(True)
+
+# --- BARIS 2: GRAFIK AMPLITUDO ---
+# Kiri: Line Plot Amplitudo
+plt.subplot(2, 2, 3)
+plt.plot(df_stay['Amplitude'].values[:N_PACKETS], label='Stay (Diam)', color='blue', alpha=0.7)
+plt.plot(df_move['Amplitude'].values[:N_PACKETS], label='Move (Bergerak)', color='orange', alpha=0.7)
+plt.title('Amplitudo Terhadap Waktu')
+plt.xlabel('Indeks Paket')
+plt.ylabel('Nilai Amplitudo')
+plt.legend()
+plt.grid(True)
+
+# Kanan: Boxplot Amplitudo
+plt.subplot(2, 2, 4)
+plt.boxplot([df_stay['Amplitude'], df_move['Amplitude']], labels=['Stay (Diam)', 'Move (Bergerak)'])
+plt.title('Distribusi / Fluktuasi Amplitudo')
+plt.ylabel('Nilai Amplitudo')
+plt.grid(True)
+
+# Output Akhir
+plt.tight_layout()
+plt.show()

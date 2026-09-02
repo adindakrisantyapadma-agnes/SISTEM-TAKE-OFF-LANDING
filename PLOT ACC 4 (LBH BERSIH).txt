@@ -1,0 +1,133 @@
+import serial
+import matplotlib.pyplot as plt
+import numpy as np
+import time
+
+# ==================================
+# --- KONFIGURASI PENGATURAN PLOT ---
+# ==================================
+
+SERIAL_PORT = 'COM8' 
+BAUD_RATE = 921600  
+
+# PARAMETER FILTER EMA (SMOOTHING)
+# Semakin kecil nilainya (mendekati 0), semakin halus (smooth) plotnya.
+# Semakin besar nilainya (mendekati 1), semakin cepat plot bereaksi terhadap gerakan.
+EMA_ALPHA = 0.2 
+
+# PARAMETER SCROLLING PLOT
+SCROLL_WINDOW_SIZE = 150 
+CSI_START_INDEX = 10  
+CSI_END_INDEX   = 120 
+
+# ==================================
+# --- FUNGSI PARSING DATA ---
+# (Tetap sama, hanya perlu ditambahkan EMA_ALPHA ke main)
+# ==================================
+
+def parse_csi_data(line):
+    """Mengurai string data CSI dan mengembalikan Magnitudo Rata-Rata."""
+    try:
+        if not line.startswith("CSI_DATA"):
+            return None
+        
+        start_quote = line.find('"[') 
+        end_quote = line.rfind(']"')
+
+        if start_quote == -1 or end_quote == -1 or start_quote >= end_quote:
+            return None
+
+        raw_csi_str = line[start_quote + 2 : end_quote]
+        csi_values = np.array([int(val) for val in raw_csi_str.split(',') if val.strip()], dtype=np.int16)
+        
+        if len(csi_values) % 2 == 0:
+            I = csi_values[::2]
+            Q = csi_values[1::2]
+            magnitude = np.sqrt(I**2 + Q**2)
+        else:
+            return None 
+
+        filtered_magnitude = magnitude[CSI_START_INDEX:CSI_END_INDEX]
+        return np.mean(filtered_magnitude)
+
+    except Exception as e:
+        return None
+
+# ==================================
+# --- FUNGSI UTAMA PLOTTING SCROLLING DENGAN EMA ---
+# ==================================
+
+def main():
+    plt.ion() 
+    fig, ax = plt.subplots()
+    
+    data_buffer = np.zeros(SCROLL_WINDOW_SIZE)
+    x_data = np.arange(SCROLL_WINDOW_SIZE) 
+    line, = ax.plot(x_data, data_buffer, color='#1f77b4', linewidth=1.5)
+
+    ax.set_title(f"CSI Average Magnitude (EMA Filtered, Alpha={EMA_ALPHA})")
+    ax.set_xlabel(f"Waktu (Frame Terakhir {SCROLL_WINDOW_SIZE})")
+    ax.set_ylabel("Average CSI Magnitude")
+    ax.set_ylim(0, 300) 
+    ax.grid(True)
+    ax.set_xlim(0, SCROLL_WINDOW_SIZE)
+
+    plt.show(block=False) 
+
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+        print(f"--- Berhasil terhubung ke {SERIAL_PORT} dengan baud rate {BAUD_RATE} ---")
+        ser.flushInput() 
+        time.sleep(1)
+
+        # Inisialisasi nilai EMA terakhir (nilai awal buffer)
+        last_ema_value = 0 
+
+        while True:
+            if ser.in_waiting > 0:
+                line_str = ser.readline().decode('utf-8', errors='ignore') 
+                avg_magnitude = parse_csi_data(line_str)
+
+                if avg_magnitude is not None:
+                    
+                    # ----------------------------------------------------
+                    # --- IMPLEMENTASI EXPONENTIAL MOVING AVERAGE (EMA) ---
+                    # ----------------------------------------------------
+                    if last_ema_value == 0:
+                        last_ema_value = avg_magnitude # Nilai awal
+                    else:
+                        # Rumus EMA: New_EMA = (Alpha * Data_Baru) + ((1 - Alpha) * EMA_Lama)
+                        avg_magnitude = (EMA_ALPHA * avg_magnitude) + ((1 - EMA_ALPHA) * last_ema_value)
+                    
+                    last_ema_value = avg_magnitude 
+                    # ----------------------------------------------------
+                    
+                    # Lakukan Rolling
+                    data_buffer = np.roll(data_buffer, -1)
+                    data_buffer[-1] = avg_magnitude # Masukkan nilai yang sudah di-smooth
+                    
+                    # Update plot
+                    line.set_ydata(data_buffer) 
+                    
+                    # Sesuaikan batas Y
+                    valid_data = data_buffer[data_buffer != 0]
+                    if valid_data.size > 0:
+                        y_min, y_max = valid_data.min() - 5, valid_data.max() + 5
+                        ax.set_ylim(max(0, y_min), y_max)
+                    
+                    fig.canvas.draw_idle()
+                    fig.canvas.flush_events()
+                    
+            plt.pause(0.0001) 
+            
+    except serial.SerialException as e:
+        print(f"\n[ERROR SERIAL] Gagal terhubung ke {SERIAL_PORT}.")
+    except KeyboardInterrupt:
+        print("\nPlotting dihentikan oleh pengguna.")
+    finally:
+        if 'ser' in locals() and ser.is_open:
+            ser.close()
+        plt.close(fig)
+
+if __name__ == '__main__':
+    main()
